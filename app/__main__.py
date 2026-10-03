@@ -26,6 +26,7 @@ from app.services.preview import PreviewService
 from app.services.search import SearchService
 from app.services.source import SourceService
 from app.telegram.manager import TelegramManager
+from app.utils.memtrim import run_memory_trim_loop
 from app.utils.proactor_patch import silence_proactor_connection_reset
 from app.web import auth as web_auth
 from app.web.routes import create_app
@@ -180,9 +181,11 @@ async def run(base_dir: Path) -> None:
         access_log=False,
     )
     server = uvicorn.Server(config)
+    trim_task = asyncio.create_task(run_memory_trim_loop())
     try:
         await server.serve()
     finally:
+        trim_task.cancel()
         await svc.tg.stop()
         await svc.downloads.stop_workers()
         library_scan_task.cancel()
