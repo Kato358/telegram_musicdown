@@ -44,6 +44,7 @@ STALE_TMP_SEC = 3600  # 秒；比任何一次试听下载都长，不留活着�
 COVER_API = "https://api.lrc.cx/cover"
 COVER_TIMEOUT = 8  # 秒；接口查不到歌时会挂住不回，必须设超时降级
 COVER_FAIL_TTL = 600  # 失败负缓存秒数：查不到的查询期间内直接 404，不反复外呼空等
+COVER_FAIL_MAX_ENTRIES = 512  # 失败负缓存条数上限：按「查过的歌」无限长是缓慢的内存泄漏
 COVER_CONCURRENCY = 4  # 与试听槽（并发 1）分开限流：列表页几十行同时要封面
 COVER_MAX_BYTES = 5 * 1024 * 1024
 
@@ -358,8 +359,10 @@ class PreviewService:
         if final.exists():
             return final
         failed_at = self._cover_failures.get(key)
-        if failed_at is not None and time.monotonic() - failed_at < COVER_FAIL_TTL:
-            return None
+        if failed_at is not None:
+            if time.monotonic() - failed_at < COVER_FAIL_TTL:
+                return None
+            del self._cover_failures[key]  # 过期的标记顺手清掉，否则它永远占着一条
         async with self._cover_sem:
             if final.exists():  # 排队期间别的请求已取回
                 return final
@@ -371,6 +374,8 @@ class PreviewService:
             if not data:
                 logger.info("cover not found title=%r artist=%r", q_title, q_artist)
                 self._cover_failures[key] = time.monotonic()
+                while len(self._cover_failures) > COVER_FAIL_MAX_ENTRIES:
+                    self._cover_failures.pop(next(iter(self._cover_failures)))  # 插入序即淘汰序
                 return None
             self.preview_dir.mkdir(parents=True, exist_ok=True)
             self._cover_failures.pop(key, None)

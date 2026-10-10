@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -87,6 +88,8 @@ class UserClient:
             proxy=_proxy_dict(secrets),  # type: ignore[arg-type]
             in_memory=False,
         )
+        #: update 排空协程（见 ``_start_update_drain``）：连接期一直活着，断连时 cancel
+        self._update_drain: asyncio.Task[None] | None = None
 
     async def connect(self) -> None:
         """连接（FR-AUTH-01/03）：Kurigram 的会话启动对网络失败是无限重试，故设硬超时。"""
@@ -97,12 +100,47 @@ class UserClient:
             raise _connect_error(self.secrets, e) from e
         except (OSError, ConnectionError) as e:
             raise _connect_error(self.secrets, e) from e
+        self._start_update_drain()
+
+    def _start_update_drain(self) -> None:
+        """排空并丢弃 Kurigram 的 update 队列（kurigram#467，内存只增不减的根因）。
+
+        本客户端只调 ``connect()``：登录流程要自己控验证码/两步密码，走不了 ``start()``
+        的交互式授权。而 ``Dispatcher.start()``——唯一会 ``get()``
+        ``dispatcher.updates_queue`` 的地方——只在 ``Client.initialize()`` 里被调，后者
+        只由 ``Client.start()`` 触发。于是 Telegram 推过来的每一条 update 都堆进那个
+        **无界** ``asyncio.Queue``，进程不重启就一直涨（实测约 1.3KB/条，闲置在线的
+        音乐账号几天就能堆出几百 MB）。
+
+        本客户端不注册任何 handler：update 对业务没有任何用处，取走丢掉即可——队列随取
+        随空，占用回到常数级。
+        """
+        if self.client.dispatcher.handler_worker_tasks:
+            return  # 有人启动过 Dispatcher：队列有真消费者，别把 update 抢走
+        if self._update_drain is not None and not self._update_drain.done():
+            return
+        self._update_drain = asyncio.create_task(self._drain_updates())
+
+    async def _drain_updates(self) -> None:
+        """取走即丢：唯一的退出方式是 ``disconnect()`` 里的 cancel。"""
+        queue = self.client.dispatcher.updates_queue
+        while True:
+            await queue.get()
 
     async def disconnect(self) -> None:
+        await self._stop_update_drain()
         try:
             await self.client.disconnect()
         except Exception:  # noqa: BLE001  断连失败不该盖住真正的错误
             logger.warning("user client disconnect failed", exc_info=True)
+
+    async def _stop_update_drain(self) -> None:
+        task, self._update_drain = self._update_drain, None
+        if task is None or task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
     async def is_authorized(self) -> bool:
         """会话是否已登录（FR-AUTH-02）：未授权时 get_me 报 Unauthorized。"""

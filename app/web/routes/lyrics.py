@@ -30,6 +30,7 @@ LYRICS_TIMEOUT = 15  # 秒；上游冷查询可达 10s+（查不到时挂满超�
 LYRICS_FAIL_TTL = 600  # 失败负缓存秒数：查不到的查询期间内直接空响应，不反复外呼
 LYRICS_TTL = 24 * 3600  # 歌词几乎不变：命中缓存一天内不再外呼
 LYRICS_MAX_ENTRIES = 512  # 内存缓存条数上限（每条几 KB，封顶 MB 量级）
+LYRICS_FAIL_MAX_ENTRIES = 512  # 失败负缓存条数上限（每条只是 key + 时刻，也必须有上限）
 LYRICS_MAX_BYTES = 256 * 1024  # 单条响应大小上限，超过按失败处理
 LYRICS_CONCURRENCY = 4  # 与封面的外呼限流一致：切歌即要歌词，挡住连点
 
@@ -72,8 +73,10 @@ class LyricsCache:
                     return text
                 del self._hits[key]
             failed_at = self._fails.get(key)
-            if failed_at is not None and time.monotonic() - failed_at < LYRICS_FAIL_TTL:
-                return ""
+            if failed_at is not None:
+                if time.monotonic() - failed_at < LYRICS_FAIL_TTL:
+                    return ""
+                del self._fails[key]  # 过期的标记顺手清掉，否则它永远占着一条
         async with self._sem:
             fetched: str | None = None
             try:
@@ -91,6 +94,8 @@ class LyricsCache:
             # 上游 404 / 超时 / 返回了没有时间轴的纯文本歌词（APlayer 渲染不了）都会走到这
             logger.info("lyrics not found title=%r artist=%r", title, artist)
             self._fails[key] = time.monotonic()
+            while len(self._fails) > LYRICS_FAIL_MAX_ENTRIES:
+                self._fails.pop(next(iter(self._fails)))  # 插入序即淘汰序，先来的先走
             return ""
 
 
