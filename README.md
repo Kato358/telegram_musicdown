@@ -84,7 +84,7 @@ docker compose up -d
 ```yaml
 services:
   musicdown:
-    image: ghcr.io/kato358/telgram_musicdown:latest
+    image: ghcr.io/kato358/telegram_musicdown:latest
     container_name: musicdown
     restart: unless-stopped
     ports:
@@ -103,7 +103,7 @@ services:
       - ./data:/data/data             # 密钥 + TG 会话 + 缓存 + 日志 + SQLite
 ```
 
-镜像已发布到 GHCR：`ghcr.io/kato358/telgram_musicdown:latest`；`docker compose up -d` 会自动拉取，也可 `docker pull ghcr.io/kato358/telgram_musicdown:latest`。
+镜像已发布到 GHCR：`ghcr.io/kato358/telegram_musicdown:latest`；`docker compose up -d` 会自动拉取，也可 `docker pull ghcr.io/kato358/telegram_musicdown:latest`。（仓库 `telgram_musicdown` → `telegram_musicdown` 改名后镜像包名跟着走；旧包 `ghcr.io/kato358/telgram_musicdown` 停在 0.1.4，老部署把 compose 里的 `image:` 改这一行即可。）
 镜像以非 root 用户（`tgm`，`useradd` 默认分配 UID/GID）运行，宿主机挂载目录需允许该用户读写。
 
 **标签分工与发版**：`:latest` 只跟着 `main` 移动；每次 push 到 `main` 还会推一个 `:sha-<完整提交>` 标签。版本号由**打标签**产生——先在 `docs/releases/v0.2.0.md` 写好这条版本的正文（首行写成 `# v0.2.0 一句话标题` 时，它会当 Release 标题、正文从第二行起；不写这行就只用标签名当标题），再 `git tag -a v0.2.0 && git push origin v0.2.0`：CI 推 `:0.2.0` 与 `:0.2` 两个镜像标签，并**自动建一条 GitHub Release**，正文取那个 md（文件不在就退回 GitHub 自动生成的 release notes；`docs/releases` 里没有对应文件也能发，只是正文是自动生成的）。要锁版本就把 `image:` 钉到 `:0.2.0`，跟着最新开发走则留 `:latest`。

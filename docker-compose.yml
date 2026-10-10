@@ -15,7 +15,7 @@
 #   会话/temp/日志/密钥默认收在 data/ 下，不再单独挂卷。
 services:
   musicdown:
-    image: ghcr.io/kato358/telgram_musicdown:latest
+    image: ghcr.io/kato358/telegram_musicdown:latest
     container_name: musicdown
     restart: unless-stopped
     ports:
