@@ -129,10 +129,11 @@ def register(app: FastAPI, ctx: RouteContext) -> None:
 
     @app.delete("/api/logs")
     async def logs_clear(_: None = Depends(ctx.check_session)) -> dict[str, bool]:
-        """清空当前日志（truncate app.log，旋转备份保留）。
+        """清空当前日志（truncate app.log）。
 
-        RotatingFileHandler 以 append 模式打开，外部 truncate 后写入仍会追加到
-        文件末尾，不需要重启进程。
+        ``RecentLinesFileHandler`` 以 append 模式打开，外部 truncate 后写入仍会追加到
+        文件末尾，不需要重启进程；handler 的行计数会偏高一次，下一次写记录时按文件实际
+        内容重数（见 ``app.utils.logfile``）。
         """
 
         def _truncate() -> None:

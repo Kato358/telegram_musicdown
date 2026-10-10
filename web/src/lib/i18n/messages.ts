@@ -482,13 +482,13 @@ export const zhCN: Dict = {
 
   logs: {
     title: "日志",
-    lede: "运行日志实时尾部（logs/ 滚动文件），连接期间的错误即时提示。",
+    lede: "运行日志实时尾部（app.log 只保留最近 500 行），连接期间的错误即时提示。",
     empty: "本次连接没有错误。",
     clear: "清空",
     count: "{n} 条错误",
     errorSection: "实时错误事件",
     serverSection: "运行日志",
-    serverHint: "事实源是 logs/ 下的滚动文件 · {name} · {size}",
+    serverHint: "事实源是 app.log（只保留最近 500 行）· {name} · {size}",
     searchPlaceholder: "搜索消息或来源…",
     levelLabel: "按级别筛选",
     file: "日志文件",
@@ -1214,13 +1214,13 @@ export const en: Dict = {
 
   logs: {
     title: "Logs",
-    lede: "Live tail of the run log (rotating files under logs/), plus real-time errors while connected.",
+    lede: "Live tail of the run log (app.log keeps the latest 500 lines), plus real-time errors while connected.",
     empty: "No errors during this connection.",
     clear: "Clear",
     count: "{n} errors",
     errorSection: "Live errors",
     serverSection: "Run log",
-    serverHint: "Sourced from the rotating files under logs/ · {name} · {size}",
+    serverHint: "Sourced from app.log (latest 500 lines only) · {name} · {size}",
     searchPlaceholder: "Search message or source…",
     levelLabel: "Filter by level",
     file: "Log file",

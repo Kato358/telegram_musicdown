@@ -11,7 +11,6 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from app.config import SecretConfig, app_dirs, load_secrets, web_dist_dir
@@ -26,6 +25,7 @@ from app.services.preview import PreviewService
 from app.services.search import SearchService
 from app.services.source import SourceService
 from app.telegram.manager import TelegramManager
+from app.utils.logfile import RecentLinesFileHandler, drop_legacy_rotations
 from app.utils.memtrim import run_memory_trim_loop
 from app.utils.proactor_patch import silence_proactor_connection_reset
 from app.web import auth as web_auth
@@ -33,18 +33,23 @@ from app.web.routes import create_app
 
 
 def setup_logging(logs_dir: Path, level: int = logging.INFO) -> None:
-    """统一 logging；logs/ 滚动 10MB × 5（编码规范 §2.5）。"""
+    """统一 logging；``logs/app.log`` 只保留最近 500 行（编码规范 §2.5、FR-WEB-06）。"""
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
     root = logging.getLogger()
     root.setLevel(level)
-    handler = RotatingFileHandler(
-        logs_dir / "app.log", maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
-    )
+    # 旧版旋转备份（app.log.1…N）改成按行封顶后再没有写入者：留着只是磁盘占用
+    dropped = drop_legacy_rotations(logs_dir)
+    handler = RecentLinesFileHandler(logs_dir / "app.log")
     handler.setFormatter(fmt)
     root.addHandler(handler)
     console = logging.StreamHandler(sys.stderr)
     console.setFormatter(fmt)
     root.addHandler(console)
+    if dropped:
+        logging.getLogger(__name__).info(
+            "dropped %d legacy rotated log file(s): logs/app.log keeps the latest 500 lines",
+            dropped,
+        )
 
 
 @dataclass(slots=True)
