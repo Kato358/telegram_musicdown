@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from dataclasses import asdict, replace
@@ -55,6 +56,9 @@ logger = logging.getLogger(__name__)
 MAX_RETRIES = 3
 RETRY_BASE_SEC = 30
 RETRY_CAP_SEC = 3600
+#: worker 空转兜底轮询间隔（秒）。正常流转由 _wake 事件即时唤醒；这个 timeout 只服务
+#: 「退避时间到了」这类由时间而不是事件驱动的就绪，故不必亚秒级。
+IDLE_POLL_SEC = 2.0
 
 
 def backoff_sec(retry_count: int) -> int:
@@ -99,6 +103,10 @@ class DownloadService:
         self.max_concurrent = max_concurrent
         self._sem = asyncio.Semaphore(max_concurrent)
         self._worker_tasks: list[asyncio.Task[None]] = []
+        # 「有新任务入队/可重试了」的唤醒信号：worker 空转时等它，不必纯轮询
+        self._wake = asyncio.Event()
+        # stop_workers 进行中：抑制 worker 死亡后的自动补位，避免关机时长出孤儿任务
+        self._stopping_workers = False
         # 运行态（暂停/取消标记 + 在跑协程）：与进度回调共用同一份事实源
         self._run_state = TaskRunState()
         self.tags = TagService()
@@ -142,19 +150,53 @@ class DownloadService:
             )
         )
         await self._set_status(task_id, "queued", history_id)
+        self._wake.set()  # 立即唤醒空转 worker，不必等兜底轮询
         return task_id
 
     async def start_workers(self, count: int | None = None) -> None:
-        """启动 worker 池。"""
+        """启动 worker 池。
+
+        worker 非取消原因退出（如失败记账自身抛错）由 done-callback 补位：没有它，
+        并发池会悄悄少几个人，队列看起来「不动了」却没有任何报错。
+        """
+        self._stopping_workers = False
         n = count or self.max_concurrent
         for i in range(n):
-            t = asyncio.create_task(self._worker(f"worker-{i}"))
-            self._worker_tasks.append(t)
+            self._spawn_worker(i)
+
+    def _spawn_worker(self, index: int) -> None:
+        name = f"worker-{index}"
+        t = asyncio.create_task(self._worker(name))
+        self._worker_tasks.append(t)
+
+        def _done(task: asyncio.Task[None], name: str = name, index: int = index) -> None:
+            self._on_worker_done(task, name, index)
+
+        t.add_done_callback(_done)
+
+    def _on_worker_done(self, task: asyncio.Task[None], name: str, index: int) -> None:
+        """worker 退出回调：正常取消不补位；意外死亡记录并重启同编号 worker。"""
+        with contextlib.suppress(ValueError):
+            self._worker_tasks.remove(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        if self._stopping_workers:
+            logger.error("worker %s exited during shutdown: %r", name, exc)
+            return
+        logger.error("worker %s died unexpectedly, restarting: %r", name, exc)
+        self._spawn_worker(index)
 
     async def stop_workers(self) -> None:
-        for t in self._worker_tasks:
+        self._stopping_workers = True
+        for t in list(self._worker_tasks):
             t.cancel()
         await asyncio.gather(*self._worker_tasks, return_exceptions=True)
+        # 死亡回调可能在 gather 返回后才补位；再扫一次取消，别留孤儿 pending task
+        for t in list(self._worker_tasks):
+            t.cancel()
         self._worker_tasks.clear()
 
     async def pause_task(self, task_id: int) -> None:
@@ -171,6 +213,7 @@ class DownloadService:
         task = self._require_task(task_id)
         self._run_state.clear(task_id)
         await self._set_status(task_id, "queued", task.history_id)
+        self._wake.set()
 
     async def cancel_task(self, task_id: int) -> None:
         task = self._require_task(task_id)
@@ -231,6 +274,7 @@ class DownloadService:
         self.store.reset_task_for_retry(task_id)
         if task.history_id is not None:
             self.store.reset_history_for_retry(task.history_id)
+        self._wake.set()
         await self._publish_status(task_id, "queued")
 
     async def delete_task(self, task_id: int) -> None:
@@ -279,10 +323,17 @@ class DownloadService:
 
     async def _worker(self, name: str) -> None:
         logger.info("%s started (concurrency=%d)", name, self.max_concurrent)
+        if self._stopping_workers:
+            return  # 停机过程中被 done-callback 补位出来的：直接退，不接活
         while True:
+            # 先清再查：清在查前，入队发生的 set() 不会被这次查询吞掉又漏掉唤醒
+            self._wake.clear()
             task = self._next_queued()
             if task is None:
-                await asyncio.sleep(0.5)
+                # 事件驱动等待：入队/恢复/重试都会 set()。兜底 timeout 只服务
+                # 「退避时间到了」这种由时间驱动、没有事件伴随的就绪。
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._wake.wait(), timeout=IDLE_POLL_SEC)
                 continue
             task_id = int(task["id"])
             current = asyncio.current_task()
@@ -295,12 +346,31 @@ class DownloadService:
             except Exception as e:
                 # NFR-08：失败任务写人类可读原因到 tasks/history 再返回
                 reason = f"task crashed: {e}"
-                await self._fail_or_retry(task, reason)
+                try:
+                    await self._fail_or_retry(task, reason)
+                except Exception:
+                    # 记账自身失败（如 DB 故障）不能把 worker 拖死在这个任务上：
+                    # 让异常逃出 _worker，由 done-callback 记录并以新 worker 补位。
+                    logger.exception("worker %s bookkeeping failed on task %s", name, task_id)
+                    self._release_claimed(task_id)
+                    raise
                 logger.exception("worker %s crashed on task %s", name, task_id)
             finally:
                 if current is not None:
                     self._run_state.unregister_running(task_id, current)
                 self._run_state.forget_cancelled(task_id)
+
+    def _release_claimed(self, task_id: int) -> None:
+        """worker 死亡时把它名下那条任务放回 ``queued``（尽力而为）。
+
+        ``next_queued_task`` 取到任务即标 ``downloading``；记账失败会让 worker 死在这条
+        任务上，若不放回，补位的 worker 只会查到一条 ``downloading``——任务僵在队列里，
+        直到下次重启才被 ``recover_interrupted`` 收走。
+        """
+        with contextlib.suppress(Exception):
+            task = self.store.get_task(task_id)
+            if task is not None and task.status == "downloading":
+                self.store.update_task(task_id, status="queued")
 
     async def _fail_or_retry(self, task: dict[str, Any], reason: str) -> None:
         """失败结算（FR-DL-04）：未超上限则排入退避重试，超限则落 failed 终态。
@@ -330,6 +400,7 @@ class DownloadService:
                 reason,
             )
             await self._publish_status(task_id, "queued", reason)
+            self._wake.set()  # 退避未到的任务不会被取走，唤醒只为即时性；到点由兜底轮询接住
             return
         await self._set_status(task_id, "failed", history_id, error=reason)
 

@@ -23,6 +23,7 @@ from app.db.store import Store
 from app.domain import TemplateConfig, TrackMeta
 from app.events import EventBus
 from app.services.download import (
+    IDLE_POLL_SEC,
     MAX_RETRIES,
     DownloadRequest,
     DownloadService,
@@ -719,3 +720,93 @@ async def test_backoff_prevents_immediate_requeue(
     store.update_task(task_id, next_retry_at="2000-01-01T00:00:00+00:00")
     got = service._next_queued()
     assert got is not None and got["id"] == task_id
+
+
+async def test_worker_respawns_after_unexpected_death(
+    svc: tuple[DownloadService, Store, FakeUserClient],
+) -> None:
+    # 失败记账自身抛错（如 DB 故障）会杀死 worker：必须补位，否则并发池悄悄缩水、
+    # 队列假死且没有任何报错。补出来的 worker 还要继续把失败结算成退避重试。
+    service, store, _ = svc
+    task_id = await service.enqueue(req(1))
+    assert task_id is not None
+
+    real_run_task = service._run_task
+    real_fail_or_retry = service._fail_or_retry
+    deaths = 0
+
+    async def exploding_run_task(task: dict[str, Any]) -> None:
+        raise RuntimeError("fetch blew up")
+
+    async def flaky_bookkeeping(task: dict[str, Any], reason: str) -> None:
+        nonlocal deaths
+        deaths += 1
+        if deaths == 1:
+            raise RuntimeError("db gone")  # 记账失败：worker 只能死
+        await real_fail_or_retry(task, reason)
+
+    service._run_task = exploding_run_task  # type: ignore[method-assign]
+    service._fail_or_retry = flaky_bookkeeping  # type: ignore[method-assign]
+    try:
+        await service.start_workers(1)
+        first = service._worker_tasks[0]
+        await asyncio.sleep(0.2)  # 死亡 + 补位 + 新 worker 再消费一次同一任务
+
+        assert deaths == 2  # 第一次记账炸掉 worker；补位后的第二次恢复正常结算
+        current = list(service._worker_tasks)
+        assert len(current) == 1
+        assert current[0] is not first
+        assert not current[0].done()
+        task = store.get_task(task_id)
+        assert task is not None
+        assert task.retry_count == 1  # 新 worker 把失败正常排进了退避重试
+        assert task.next_retry_at is not None
+    finally:
+        service._run_task = real_run_task  # type: ignore[method-assign]
+        service._fail_or_retry = real_fail_or_retry  # type: ignore[method-assign]
+        await service.stop_workers()
+
+
+async def test_enqueue_wakes_idle_worker_immediately(
+    svc: tuple[DownloadService, Store, FakeUserClient],
+) -> None:
+    # worker 空转等待时，入队必须即时唤醒它，而不是干等 IDLE_POLL_SEC 兜底轮询
+    service, store, _ = svc
+    await service.start_workers(1)
+    await asyncio.sleep(0.05)  # worker 进入 _wake 等待（队列空）
+    assert store.list_tasks() == []
+
+    started = asyncio.get_running_loop().time()
+    task_id = await service.enqueue(req(1))
+    assert task_id is not None
+    # 兜底轮询是 2s：唤醒若失效，这条任务要等最多 2s 才被取走
+    for _ in range(200):
+        task = store.get_task(task_id)
+        assert task is not None
+        if task.status != "queued":
+            break
+        await asyncio.sleep(0.01)
+    task = store.get_task(task_id)
+    assert task is not None
+    # 唤醒的证明就是「已离开 queued」：被 worker 取走即标 downloading，成功路径随后自行跑完
+    assert task.status in {"downloading", "success"}
+    assert asyncio.get_running_loop().time() - started < IDLE_POLL_SEC
+    await service.stop_workers()
+
+
+async def test_stop_workers_suppresses_respawn(
+    svc: tuple[DownloadService, Store, FakeUserClient],
+) -> None:
+    # 停机后仍有 worker 意外死亡时不补位：否则关机时会长出没人 await 的孤儿任务
+    service, _, _ = svc
+    await service.start_workers(1)
+    await service.stop_workers()
+    assert service._worker_tasks == []
+
+    async def die() -> None:
+        raise RuntimeError("late death")
+
+    late = asyncio.create_task(die())
+    await asyncio.sleep(0.05)  # 让它死透，制造一个异常退出的已完成任务
+    service._on_worker_done(late, "worker-0", 0)
+    assert service._worker_tasks == []
