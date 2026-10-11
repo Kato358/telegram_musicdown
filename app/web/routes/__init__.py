@@ -7,7 +7,6 @@ downloads/history/preview/browser_download/settings/search），本文件只负�
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request
@@ -17,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Str
 from fastapi.staticfiles import StaticFiles
 
 from app.errors import AppError
-from app.events import EventBus
+from app.events import EventBus, sse_event_stream
 from app.ports import IStore
 from app.ports.music import MusicSourceIndexProto
 from app.services.browser_download import BrowserDownloadService
@@ -134,16 +133,7 @@ def create_app(  # noqa: PLR0915  应用级横切面注册
         曲库扫描都从这里广播，未登录可读等于把运行状态公网裸奔，故同样过 check_session。
         """
 
-        async def gen() -> AsyncIterator[str]:
-            q = await events.subscribe()
-            try:
-                while True:
-                    ev = await q.get()
-                    yield ev.to_sse()
-            finally:
-                await events.unsubscribe(q)
-
-        return StreamingResponse(gen(), media_type="text/event-stream")
+        return StreamingResponse(sse_event_stream(events), media_type="text/event-stream")
 
     # ---- 按资源注册路由（auth/setup/stats/sources/downloads/history/preview/settings/search）----
     register_all(app, ctx)

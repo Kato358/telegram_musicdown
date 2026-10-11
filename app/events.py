@@ -11,10 +11,16 @@ import contextlib
 import json
 import logging
 import traceback
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from time import time
 
 logger = logging.getLogger(__name__)
+
+#: SSE 空闲心跳间隔（秒）。反代（nginx 默认 proxy_read_timeout 60s）会切断没有任何
+#: 字节的响应；安静期（没有下载进行时）没有任何事件可推，连接就会被切断，浏览器只能
+#: 靠 EventSource 的退避重连恢复。注释帧 ``: ping`` 对 EventSource 是合法且被忽略的。
+SSE_PING_SEC = 15.0
 
 
 @dataclass(slots=True)
@@ -97,6 +103,27 @@ class EventBus:
                 with contextlib.suppress(asyncio.QueueEmpty):
                     q.get_nowait()
             q.put_nowait(event)
+
+
+async def sse_event_stream(
+    bus: EventBus, ping_sec: float = SSE_PING_SEC
+) -> AsyncIterator[str]:
+    """订阅总线产出 SSE 帧；空闲超时发注释帧保活（反代切断空闲连接前的续命）。
+
+    ``unsubscribe`` 放在 ``finally``：客户端断开（StreamingResponse 取消生成器）
+    或服务端关闭时都要摘订阅，否则订阅者集合只增不减。
+    """
+    q = await bus.subscribe()
+    try:
+        while True:
+            try:
+                ev = await asyncio.wait_for(q.get(), ping_sec)
+            except TimeoutError:
+                yield ": ping\n\n"
+                continue
+            yield ev.to_sse()
+    finally:
+        await bus.unsubscribe(q)
 
 
 class EventBusLogHandler(logging.Handler):
