@@ -1,6 +1,6 @@
 [project]
 name = "telgram-musicdown"
-version = "0.1.0"
+version = "0.1.5"
 description = "Telegram 音乐下载器 — 单进程 FastAPI + Kurigram 应用"
 requires-python = ">=3.11"
 dependencies = [
@@ -73,6 +73,10 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 # 裸 pytest 不把 cwd 注入 sys.path（python -m 才会）：tests 包跨目录互导必须显式给根。
 pythonpath = ["."]
+# Windows proactor 传输对象在解释器退出 GC 时的 ResourceWarning：对象分配自
+# Kurigram 测试桩建事件循环，属测试侧噪音，不是业务句柄泄漏（业务句柄由
+# app/utils/logfile 的 close() 收口）。
+filterwarnings = ["ignore:unclosed transport:ResourceWarning"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]

@@ -34,8 +34,9 @@ FROM base
 COPY app ./app
 COPY --from=frontend /build/dist ./web/dist
 
-# 非 root 运行；数据目录按需创建（app_dirs 启动时 mkdir -p），镜像内只建根。
-RUN useradd -m tgm && mkdir -p /data /data/data \
+# 非 root 运行；UID 固定 1000：宿主机挂载目录按 uid 授权，随机 uid 每次重建镜像都变，
+# 用户没法预知该 chown 给谁。数据目录按需创建（app_dirs 启动时 mkdir -p），镜像内只建根。
+RUN useradd -u 1000 -m tgm && mkdir -p /data /data/data \
     && chown -R tgm:tgm /opt/app /data
 USER tgm
 

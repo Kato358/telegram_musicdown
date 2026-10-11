@@ -16,6 +16,9 @@ downloads/
 library/
 .testenv
 
+# 本地临时产物
+.tmp/
+
 # 运行日志产物
 app.log
 build-log.txt

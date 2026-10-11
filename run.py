@@ -138,9 +138,11 @@ def build_frontend(force: bool = False) -> bool:
 
 
 def start() -> int:
+    # 绑定 0.0.0.0 却没人给口令时兜底的口令：只够防误触，必须让用户看见这件事
+    default_secret = "123"  # noqa: S105  见上方注释：兜底口令，仅防误触
     os.environ.setdefault("TGM_WEB_HOST", "0.0.0.0")  # noqa: S104  公网面板默认地址，无口令会在下方中止
     os.environ.setdefault("TGM_WEB_PORT", "8787")
-    os.environ.setdefault("TGM_WEB_LOGIN_SECRET", "123")
+    os.environ.setdefault("TGM_WEB_LOGIN_SECRET", default_secret)
     os.environ.setdefault("TGM_BASE_DIR", str(ROOT))
 
     host, port = os.environ["TGM_WEB_HOST"], os.environ["TGM_WEB_PORT"]
@@ -149,6 +151,9 @@ def start() -> int:
         return 1
 
     _log(f"启动 telegram-musicdown → http://{host}:{port}")
+    if os.environ.get("TGM_WEB_LOGIN_SECRET") == default_secret:
+        _log(f"警告：未显式设置 TGM_WEB_LOGIN_SECRET，正使用默认口令 {default_secret!r}；"
+             f"监听 {host} 时同网段任何人都能登录，请改掉它")
     _log(f"数据目录 TGM_BASE_DIR={os.environ['TGM_BASE_DIR']}")
     _log("首次使用：浏览器打开上面的地址，在 /setup 向导内配置 api_id/api_hash 并登录 Telegram")
     _log("Ctrl+C 停止")

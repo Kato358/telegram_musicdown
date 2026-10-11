@@ -1,0 +1,22 @@
+# 构建上下文瘦身：镜像只需要 app/ 与 web/（前端在容器内构建），宿主机数据、
+# 曲库、本地缓存与 VCS 历史都不进 context——否则每次 build 全量上传给 daemon。
+.git/
+.github/
+docs/
+.tmp/
+downloads/
+data/
+library/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+**/__pycache__/
+*.egg-info/
+.venv/
+*.log
+build-log.txt
+.env
+config.yaml
+docker-compose.yml
+web/node_modules/
+web/dist/
