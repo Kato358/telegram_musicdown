@@ -250,7 +250,10 @@ class PreviewService:
         """LRU 淘汰（SDD §2.4）：试听按 last_access_at、封面按 mtime，共用一个字节预算。
 
         先删试听：体积大、随时能从 Telegram 重下；仍超预算再删最旧的封面（小、要外呼，
-        留到最后）。占用按磁盘实际值算，不信 preview_cache 里记录的 file_size。
+        留到最后）。两类的占用口径不同，各自跟着自己的事实源：
+        - 试听以 ``preview_cache`` 表为准（记录即活缓存；删不动的 Windows 占用文件会
+          留下孤儿，由「清理缓存」与 stale_temps 扫描收拾，见 ``_unlink``）；
+        - 封面不在表里，占用与新旧按磁盘实测（``_scan_cache``）。
         """
         while True:
             total, cnt = self.store.preview_totals()

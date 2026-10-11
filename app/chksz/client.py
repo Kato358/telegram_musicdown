@@ -36,7 +36,9 @@ _BAD_REQUEST = 400
 # 音频 CDN 常按 UA 拦请求；给一个常规 UA，避免拿到 403 的空响应。
 _AUDIO_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; TelegramMusicDown/1.0)"}
 
-_CHUNK_BYTES = 64 * 1024
+#: 流式下载分块：64KB 对 >100MB 的母带会产生上万次迭代（每次还要过一遍进度回调），
+#: 256KB 把迭代次数砍到 1/4，内存占用与流式特性都不受影响。
+_CHUNK_BYTES = 256 * 1024
 
 
 class ChkszError(AppError):
