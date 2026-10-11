@@ -14,7 +14,9 @@
 from __future__ import annotations
 
 import logging
+from contextlib import suppress
 from pathlib import Path
+from typing import TextIO
 
 #: 默认保留行数（编码规范 §2.5）。
 DEFAULT_MAX_LINES = 500
@@ -37,14 +39,27 @@ class RecentLinesFileHandler(logging.Handler):
         self.max_lines = max(1, max_lines)
         self.encoding = encoding
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # 追加句柄常开：每条记录都 open/close 一次，在高频 INFO（连接类事件）下是
+        # 纯 SysCall 浪费。打不开（只读目录等）降级成 emit 内逐次 open，行为与旧版一致。
+        self._fh: TextIO | None = self._open()
         # 上一个进程留下的文件也要计数：不数就永远到不了触发裁剪的阈值
         self._lines = self._count_lines()
+
+    def _open(self) -> TextIO | None:
+        try:
+            return self.path.open("a", encoding=self.encoding, newline="")
+        except OSError:
+            return None
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
             text = self.format(record)
-            with self.path.open("a", encoding=self.encoding, newline="") as fh:
-                fh.write(text + "\n")
+            if self._fh is not None:
+                self._fh.write(text + "\n")
+                self._fh.flush()
+            else:
+                with self.path.open("a", encoding=self.encoding, newline="") as fh:
+                    fh.write(text + "\n")
             self._lines += text.count("\n") + 1  # 异常记录是多行一条，按行计
             if self._lines > self.max_lines:
                 self._trim()
@@ -62,19 +77,25 @@ class RecentLinesFileHandler(logging.Handler):
     def _trim(self) -> None:
         """把文件裁到 ``TRIM_TO_RATIO × max_lines`` 行（只留最新的那些行）。
 
-        读不到文件（并发清空 / 权限）时只把计数归零，下一次 emit 重新数——写日志失败
-        不该影响业务（``emit`` 的调用方本就按 logging 约定不处理异常）。
+        Windows 上「还开着的追加句柄」会让同目录的 ``replace`` 失败（文件被占用），
+        所以裁剪全程先收句柄、重写完再打开；读不到文件（并发清空 / 权限）时只把计数
+        归零，下一次 emit 重新数——写日志失败不该影响业务（``emit`` 的调用方本就按
+        logging 约定不处理异常）。
         """
+        # 先收句柄：否则 tmp.replace(self.path) 在 Windows 上必然占用失败
+        self._close_fh()
         try:
             lines = self.path.read_text(encoding=self.encoding, errors="replace").splitlines(
                 keepends=True
             )
         except OSError:
             self._lines = 0
+            self._fh = self._open()
             return
         keep = max(1, int(self.max_lines * TRIM_TO_RATIO))
         if len(lines) <= keep:
             self._lines = len(lines)
+            self._fh = self._open()
             return
         kept = lines[-keep:]
         tmp = self.path.with_name(f".{self.path.name}.trim")
@@ -84,8 +105,20 @@ class RecentLinesFileHandler(logging.Handler):
         except OSError:
             tmp.unlink(missing_ok=True)
             self._lines = self._count_lines()
+            self._fh = self._open()
             return
         self._lines = len(kept)
+        self._fh = self._open()
+
+    def _close_fh(self) -> None:
+        fh, self._fh = self._fh, None
+        if fh is not None:
+            with suppress(OSError):
+                fh.close()
+
+    def close(self) -> None:
+        self._close_fh()
+        super().close()
 
 
 def drop_legacy_rotations(logs_dir: Path) -> int:

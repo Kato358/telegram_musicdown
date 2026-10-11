@@ -3,9 +3,23 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 
+import pytest
+
 from app.utils.logfile import DEFAULT_MAX_LINES, RecentLinesFileHandler, drop_legacy_rotations
+
+
+@pytest.fixture(autouse=True)
+def _close_test_handlers() -> Iterator[None]:
+    """句柄常开是实现的常态：用例结束必须 close，否则 GC 时 ResourceWarning 一片。"""
+    yield
+    for logger in list(logging.Logger.manager.loggerDict.values()):
+        if isinstance(logger, logging.Logger) and logger.name.startswith("test.logfile."):
+            for handler in logger.handlers:
+                handler.close()
+            logger.handlers.clear()
 
 
 def _logger(path: Path, max_lines: int) -> logging.Logger:
